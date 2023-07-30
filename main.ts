@@ -1,137 +1,286 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { Editor, Plugin } from "obsidian";
+import MarkdownIt from "markdown-it";
+import hljs from "highlight.js";
 
-// Remember to rename these classes and interfaces!
-
-interface MyPluginSettings {
-	mySetting: string;
+interface Question {
+  title: string;
+  answer: string | null;
+}
+interface Card {
+  content: string;
+  question: Question[];
 }
 
-const DEFAULT_SETTINGS: MyPluginSettings = {
-	mySetting: 'default'
-}
+const hashCode = (s: string) =>
+  s.split("").reduce((a, b) => {
+    a = (a << 5) - a + b.charCodeAt(0);
+    return a & a;
+  }, 0);
 
-export default class MyPlugin extends Plugin {
-	settings: MyPluginSettings;
+const EXPORT_FILENAME_EXTENSION = "txt";
+const EXPORT_FILENAME_PREFIX = "export-to-anki-";
+const CONTENT_KEYWORD = "##### content";
+const QUESTIONS_KEYWORD = "##### questions";
+const QUESTIONS_PREFIX = "###### ";
+const DEFAULT_QUESTION_CONTENT = "Question?";
+const DEFAULT_QUESTION = `${QUESTIONS_PREFIX}${DEFAULT_QUESTION_CONTENT}`;
+const TEMPLATE = `${CONTENT_KEYWORD}
 
-	async onload() {
-		await this.loadSettings();
 
-		// This creates an icon in the left ribbon.
-		const ribbonIconEl = this.addRibbonIcon('dice', 'Sample Plugin', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
-		});
-		// Perform additional things with the ribbon
-		ribbonIconEl.addClass('my-plugin-ribbon-class');
 
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status Bar Text');
+${QUESTIONS_KEYWORD}
+${DEFAULT_QUESTION}`;
 
-		// This adds a simple command that can be triggered anywhere
-		this.addCommand({
-			id: 'open-sample-modal-simple',
-			name: 'Open sample modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
-			}
-		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'sample-editor-command',
-			name: 'Sample editor command',
-			editorCallback: (editor: Editor, view: MarkdownView) => {
-				console.log(editor.getSelection());
-				editor.replaceSelection('Sample Editor Command');
-			}
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-sample-modal-complex',
-			name: 'Open sample modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
+const markdown: MarkdownIt = MarkdownIt({
+  html: true,
+  highlight: function (str, lang) {
+    if (lang && hljs.getLanguage(lang)) {
+      try {
+        return (
+          '<pre><code class="hljs">' +
+          hljs.highlight(str, { language: lang, ignoreIllegals: true }).value +
+          "</code></pre>"
+        );
+      } catch (__) {
+        //
+      }
+    }
+    return (
+      '<pre><code class="hljs">' +
+      markdown.utils.escapeHtml(str) +
+      "</code></pre>"
+    );
+  },
+});
 
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
-				}
-			}
-		});
+export default class Ankifast extends Plugin {
+  async onload() {
+    this.addCommand({
+      id: "ankifast-add-template",
+      name: "Add template",
+      hotkeys: [{ modifiers: ["Mod", "Shift"], key: "d" }],
+      editorCallback: (editor: Editor) => {
+        editor.replaceSelection(TEMPLATE);
+        editor.focus();
+        editor.setCursor({
+          line: editor.getCursor().line - 3,
+          ch: 0,
+        });
+      },
+    });
 
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
+    this.addCommand({
+      id: "ankifast-to-anki",
+      name: "Export to Anki",
+      editorCallback: (editor: Editor) => {
+        let isSelection = false;
+        const cards: Card[] = [];
+        let cardsContent = "";
+        if (editor.somethingSelected()) {
+          cardsContent = editor.getSelection();
+          isSelection = true;
+        } else cardsContent = editor.getValue();
 
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			console.log('click', evt);
-		});
+        const countContentRegExp = new RegExp(
+          `${CONTENT_KEYWORD.replace("#", "[#]")}`,
+          "g"
+        );
+        const countQuestionsRegExp = new RegExp(
+          `${QUESTIONS_KEYWORD.replace("#", "[#]")}`,
+          "g"
+        );
 
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
-	}
+        const contentHeaderCount = (
+          cardsContent.match(countContentRegExp) || []
+        ).length;
+        const questionsHeaderCount = (
+          cardsContent.match(countQuestionsRegExp) || []
+        ).length;
 
-	onunload() {
+        if (contentHeaderCount != questionsHeaderCount) {
+          alert(
+            `Error: content(${contentHeaderCount}) and questions(${questionsHeaderCount}) headers mismatch`
+          );
+          return;
+        }
 
-	}
+        while (cardsContent.indexOf(CONTENT_KEYWORD) != -1) {
+          const card: Card = {
+            content: "",
+            question: [],
+          };
+          let index: number | undefined = cardsContent.indexOf(
+            CONTENT_KEYWORD
+          );
+          cardsContent = cardsContent.substring(
+            index + CONTENT_KEYWORD.length
+          );
+          index = cardsContent.indexOf(CONTENT_KEYWORD);
 
-	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
-	}
+          if (index != -1) {
+            index = index + CONTENT_KEYWORD.length;
+          } else index = undefined;
 
-	async saveSettings() {
-		await this.saveData(this.settings);
-	}
-}
+          let cardBody = cardsContent.substring(0, index);
 
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
-	}
+          index = cardBody.indexOf(QUESTIONS_KEYWORD);
+          card.content = cardBody.substring(0, index).trim();
+          index = cardBody.indexOf(QUESTIONS_KEYWORD);
+          cardBody = cardBody.substring(index + QUESTIONS_KEYWORD.length);
+          while (cardBody.indexOf(QUESTIONS_PREFIX) != -1) {
+            const question: Question = {
+              title: "",
+              answer: null,
+            };
+            index = cardBody.indexOf(QUESTIONS_PREFIX);
+            cardBody = cardBody.substring(
+              index + QUESTIONS_PREFIX.length
+            );
 
-	onOpen() {
-		const {contentEl} = this;
-		contentEl.setText('Woah!');
-	}
+            question.title = cardBody.split(/\r?\n|\r|\n/g)[0];
 
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
-	}
-}
+            if (question.title == DEFAULT_QUESTION_CONTENT) {
+              continue;
+            }
 
-class SampleSettingTab extends PluginSettingTab {
-	plugin: MyPlugin;
+            index = cardBody.indexOf(question.title);
+            cardBody = cardBody.substring(index + question.title.length);
 
-	constructor(app: App, plugin: MyPlugin) {
-		super(app, plugin);
-		this.plugin = plugin;
-	}
+            index = cardBody.indexOf(QUESTIONS_PREFIX);
+            if (index == -1) {
+              index = cardBody.indexOf(CONTENT_KEYWORD);
+            }
+            if (index == -1) {
+              index = 0;
+            }
 
-	display(): void {
-		const {containerEl} = this;
+            question.answer = cardBody.substring(0, index).trim();
+            if (question.answer.length == 0) question.answer = null;
+            card.question.push(question);
+          }
+          cards.push(card);
+        }
+        (async () => {
+          const renderToHtml = async (content: string) => {
+            return (await markdown.render(content)).replace(/\n/g, "");
+          };
 
-		containerEl.empty();
+          const escapeLatexSpace = (latex: string) => {
+            const spaces = ["\\\\;", "\\\\:", "\\\\,", "\\\\!"];
 
-		containerEl.createEl('h2', {text: 'Settings for my awesome plugin.'});
+            for (let index = 0; index < spaces.length; index++) {
+              const element = spaces[index];
+              latex = latex.replace(new RegExp(element, 'g'), "\\" + element);
+            }
 
-		new Setting(containerEl)
-			.setName('Setting #1')
-			.setDesc('It\'s a secret')
-			.addText(text => text
-				.setPlaceholder('Enter your secret')
-				.setValue(this.plugin.settings.mySetting)
-				.onChange(async (value) => {
-					console.log('Secret: ' + value);
-					this.plugin.settings.mySetting = value;
-					await this.plugin.saveSettings();
-				}));
-	}
+            return latex;
+          };
+
+          const replaceLatex = (content: string) => {
+            const latexBlockRegExp = /\$\$(.*?)\$\$/g;
+            const latexInlineRegExp = /\$.*?\$/g;
+
+            if (latexBlockRegExp.test(content)) {
+              const matches = content.match(latexBlockRegExp);
+              if (matches) {
+                for (let index = 0; index < matches.length; index++) {
+                  const match = matches[index];
+                  const latexContent = match.split("$$")[1];
+                  content = content.replace(
+                    match,
+                    "[latex]\\begin{displaymath}" +
+                      escapeLatexSpace(latexContent) +
+                      "\\end{displaymath}[/latex]"
+                  );
+                }
+              }
+            }
+
+            if (latexInlineRegExp.test(content)) {
+              const matches = content.match(latexInlineRegExp);
+              if (matches) {
+                for (let index = 0; index < matches.length; index++) {
+                  const match = matches[index];
+                  const latexContent = match.split("$")[1];
+                  content = content.replace(
+                    match,
+                    "[latex]\\begin{math}" +
+                      escapeLatexSpace(latexContent) +
+                      "\\end{math}[/latex]"
+                  );
+                }
+              }
+            }
+
+            return content;
+          };
+
+          let exportedContent = "";
+          for (let index = 0; index < cards.length; index++) {
+            const card = cards[index];
+            for (
+              let indexQuestion = 0;
+              indexQuestion < card.question.length;
+              indexQuestion++
+            ) {
+              const question = card.question[indexQuestion];
+              let content = "";
+              let title = "";
+              if (question.answer != null) {
+                content = question.answer;
+              } else content = card.content;
+
+              content = replaceLatex(content);
+              content = await renderToHtml(content);
+              
+              title = replaceLatex(question.title);
+              title = await renderToHtml(title);
+              
+              exportedContent = exportedContent + title + `\t${content}\n`;
+            }
+          }
+
+          const root = this.app.vault.getRoot();
+          const currentFile = this.app.workspace.getActiveFile();
+          if (currentFile == null) {
+            alert(`Error: active file not found.`);
+            return;
+          }
+          let filename = "";
+
+          if (!isSelection) {
+            filename =
+              EXPORT_FILENAME_PREFIX +
+              currentFile.name +
+              `.${EXPORT_FILENAME_EXTENSION}`;
+          } else {
+            filename =
+              EXPORT_FILENAME_PREFIX +
+              hashCode(cardsContent) +
+              "-" +
+              currentFile.name +
+              `.${EXPORT_FILENAME_EXTENSION}`;
+          }
+
+          const filePath = root.path + filename;
+          const file = this.app.vault
+            .getFiles()
+            .find((el) => el.name == filename);
+          if (file != undefined) {
+            await this.app.vault.modify(file, exportedContent);
+          } else {
+            await this.app.vault.create(filePath, exportedContent);
+          }
+
+          alert(
+            `Exported ${
+              isSelection ? "selection" : "content"
+            } to ${filename} file.`
+          );
+        })();
+      },
+    });
+  }
+
+  onunload() {}
 }
